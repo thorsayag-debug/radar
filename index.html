@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>רדאר התראות עצמאי</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --card: #1e293b;
+            --text: #f8fafc;
+            --safe: #10b981;
+            --warn: #f59e0b;
+            --danger: #ef4444;
+            --police: #3b82f6;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+        body { background-color: var(--bg); color: var(--text); display: flex; flex-direction: column; height: 100vh; padding: 16px; overflow: hidden; user-select: none; }
+        
+        .status-bar { display: flex; justify-content: space-between; font-size: 0.9rem; color: #94a3b8; margin-bottom: 12px; }
+        
+        .dashboard { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; background: var(--card); border-radius: 20px; padding: 20px; border: 3px solid var(--safe); transition: all 0.2s; position: relative; }
+        .dashboard.warn { border-color: var(--warn); background: #451a03; }
+        .dashboard.danger { border-color: var(--danger); background: #450a0a; animation: pulse 0.6s infinite alternate; }
+        
+        @keyframes pulse { from { transform: scale(1); } to { transform: scale(0.98); } }
+
+        .speed-box { text-align: center; margin-bottom: 20px; }
+        .speed-val { font-size: 5.5rem; font-weight: 900; line-height: 1; }
+        .speed-unit { font-size: 1.2rem; color: #94a3b8; }
+
+        .alert-box { text-align: center; min-height: 90px; }
+        .alert-title { font-size: 1.6rem; font-weight: bold; margin-bottom: 5px; }
+        .alert-dist { font-size: 2.5rem; font-weight: 800; color: var(--warn); }
+
+        .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+        .btn { border: none; border-radius: 14px; padding: 16px; font-size: 1.1rem; font-weight: bold; color: white; cursor: pointer; active: scale(0.97); }
+        .btn-police { grid-column: span 2; background: var(--police); font-size: 1.4rem; padding: 22px; box-shadow: 0 4px 15px rgba(59, 130, 246, 0.4); }
+        .btn-sync { background: #475569; }
+        .btn-export { background: #334155; }
+    </style>
+</head>
+<body>
+
+    <div class="status-bar">
+        <span id="gps-status">מחפש לוויינים...</span>
+        <span id="db-count">מאגר: 0 נקודות</span>
+    </div>
+
+    <div class="dashboard" id=" radar-screen">
+        <div class="speed-box">
+            <div class="speed-val" id="speed">0</div>
+            <div class="speed-unit">קמ"ש</div>
+        </div>
+
+        <div class="alert-box">
+            <div class="alert-title" id="alert-type">הדרך פנויה</div>
+            <div class="alert-dist" id="alert-dist"></div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button class="btn btn-police" onclick="savePoliceSpot()">🚨 שמור מיקום ניידת / מארב</button>
+        <button class="btn btn-sync" onclick="syncCommunityCameras()">🔄 עדכן מצלמות קהילה</button>
+        <button class="btn btn-export" onclick="exportData()">💾 גבה נקודות (JSON)</button>
+    </div>
+
+<script>
+    const defaultPoliceSpots = [
+        { lat: 32.5186, lon: 34.9189, type: "police", name: "מארב ניידת - כביש 2 (אור עקיבא/קיסריה)" },
+        { lat: 32.4632, lon: 34.9015, type: "police", name: "מארב לייזר - כביש 2 (מחלף אולגה)" },
+        { lat: 32.4590, lon: 34.9450, type: "police", name: "נקודת משטרה - כביש 65 (צומת נחל חדרה)" },
+        { lat: 32.5350, lon: 34.9280, type: "police", name: "מארב ניידת - כביש 4 (בנימינה/אור עקיבא)" }
+    ];
+
+    let pointsDB = JSON.parse(localStorage.getItem('radar_db')) || defaultPoliceSpots;
+    let currentPos = null;
+    let audioCtx = null;
+    let lastBeepTime = 0;
+
+    function updateDBCount() {
+        document.getElementById('db-count').innerText = `מאגר: ${pointsDB.length} נקודות`;
+        localStorage.setItem('radar_db', JSON.stringify(pointsDB));
+    }
+    updateDBCount();
+
+    function initAudio() {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    document.body.addEventListener('click', initAudio, { once: true });
+
+    function playBeep(freq = 950, duration = 0.12) {
+        if (!audioCtx) return;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + duration);
+    }
+
+    function getDistance(lat1, lon1, lat2, lon2) {
+        const R = 6371e3;
+        const p1 = lat1 * Math.PI/180, p2 = lat2 * Math.PI/180;
+        const dp = (lat2-lat1) * Math.PI/180;
+        const dl = (lon2-lon1) * Math.PI/180;
+        const a = Math.sin(dp/2)**2 + Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+
+    function getBearing(lat1, lon1, lat2, lon2) {
+        const l1 = lon1 * Math.PI/180, l2 = lon2 * Math.PI/180;
+        const p1 = lat1 * Math.PI/180, p2 = lat2 * Math.PI/180;
+        const y = Math.sin(l2-l1) * Math.cos(p2);
+        const x = Math.cos(p1)*Math.sin(p2) - Math.sin(p1)*Math.cos(p2)*Math.cos(l2-l1);
+        return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+    }
+
+    function isAhead(carHeading, targetBearing) {
+        if (carHeading === null || isNaN(carHeading)) return true; 
+        let diff = Math.abs(carHeading - targetBearing);
+        if (diff > 180) diff = 360 - diff;
+        return diff <= 45;
+    }
+
+    if ("geolocation" in navigator) {
+        navigator.geolocation.watchPosition(pos => {
+            currentPos = pos.coords;
+            const speedKmh = currentPos.speed ? Math.round(currentPos.speed * 3.6) : 0;
+            document.getElementById('speed').innerText = speedKmh;
+            document.getElementById('gps-status').innerText = `GPS מחובר (±${Math.round(currentPos.accuracy)}מ')`;
+
+            checkRadar(currentPos.latitude, currentPos.longitude, currentPos.heading, speedKmh);
+        }, err => {
+            document.getElementById('gps-status').innerText = `שגיאת GPS: ודא הרשאת מיקום וחיבור HTTPS`;
+        }, { enableHighAccuracy: true, maximumAge: 0 });
+    }
+
+    function checkRadar(lat, lon, heading, speed) {
+        let nearest = null;
+        let minDist = Infinity;
+
+        for (const pt of pointsDB) {
+            const dist = getDistance(lat, lon, pt.lat, pt.lon);
+            if (dist < 900 && dist < minDist) {
+                const bearing = getBearing(lat, lon, pt.lat, pt.lon);
+                if (speed < 15 || isAhead(heading, bearing)) {
+                    minDist = dist;
+                    nearest = pt;
+                }
+            }
+        }
+
+        const screen = document.querySelector('.dashboard');
+        const titleEl = document.getElementById('alert-type');
+        const distEl = document.getElementById('alert-dist');
+        const now = Date.now();
+
+        if (nearest) {
+            const d = Math.round(minDist);
+            titleEl.innerText = nearest.type === 'police' ? '🚓 מארב משטרה / לייזר!' : '📷 מצלמת מהירות / רמזור!';
+            distEl.innerText = `${d} מטר`;
+
+            if (d < 400) {
+                screen.className = 'dashboard danger';
+                if (now - lastBeepTime > 600) { playBeep(1200, 0.15); lastBeepTime = now; }
+            } else {
+                screen.className = 'dashboard warn';
+                if (now - lastBeepTime > 1500) { playBeep(880, 0.12); lastBeepTime = now; }
+            }
+        } else {
+            screen.className = 'dashboard';
+            titleEl.innerText = 'הדרך פנויה';
+            distEl.innerText = '';
+        }
+    }
+
+    function savePoliceSpot() {
+        initAudio();
+        if (!currentPos) { alert("ממתין לנעילת GPS..."); return; }
+        pointsDB.push({
+            lat: currentPos.latitude,
+            lon: currentPos.longitude,
+            heading: currentPos.heading,
+            type: "police",
+            name: "נקודת משטרה שמורה",
+            date: new Date().toISOString()
+        });
+        updateDBCount();
+        playBeep(600, 0.3);
+        alert("מיקום ניידת נשמר בהצלחה!");
+    }
+
+    async function syncCommunityCameras() {
+        const btn = document.querySelector('.btn-sync');
+        btn.innerText = "מוריד נתונים...";
+        try {
+            const query = `[out:json][timeout:25];node["highway"="speed_camera"](29.4,34.2,33.4,35.9);out body;`;
+            const res = await fetch(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`);
+            const data = await res.json();
+            
+            const userPoliceSpots = pointsDB.filter(p => p.type === 'police');
+            const osmCameras = data.elements.map(el => ({
+                lat: el.lat,
+                lon: el.lon,
+                type: "camera",
+                name: el.tags?.maxspeed ? `מצלמת מהירות (${el.tags.maxspeed})` : "מצלמת אכיפה"
+            }));
+
+            pointsDB = [...userPoliceSpots, ...osmCameras];
+            updateDBCount();
+            alert(`עודכנו בהצלחה ${osmCameras.length} מצלמות קהילה בישראל!`);
+        } catch (e) {
+            alert("שגיאה בחיבור לשרת המצלמות. בדוק חיבור אינטרנט.");
+        }
+        btn.innerText = "🔄 עדכן מצלמות קהילה";
+    }
+
+    function exportData() {
+        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(pointsDB, null, 2));
+        const a = document.createElement('a');
+        a.href = dataStr;
+        a.download = "israel_radar_points.json";
+        a.click();
+    }
+
+    if ('wakeLock' in navigator) {
+        navigator.wakeLock.request('screen').catch(() => {});
+    }
+</script>
+</body>
+</html>
